@@ -1,0 +1,15 @@
+name: multilayer-net
+channels:
+    - conda-forge
+dependencies:
+  - python
+  - pylint
+  - pandas
+  - scipy
+  - matplotlib
+  - jupyterlab
+  - numpy
+  - seaborn
+  - pip
+  - pip:
+    - networkx
