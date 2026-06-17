@@ -1,29 +1,10 @@
 import random, argparse, time, csv, os, statistics
 from dataclasses import dataclass
 import numpy as np
-
+import matrix_utils as mu
+import random_graphs
 import sys, tty, termios
 
-def irreducible(B):
-    '''
-    Checks irriducibility of nonnegative matrices.
-    If sum of M^k, k < n-1 is positive, the whole sum
-    must be positive.
-    '''
-    n = B.shape[0]
-
-    S = np.zeros((n, n), dtype=float)
-    P = np.eye(n, dtype=float)
-
-    # sum_{k = 0}^{n-1} 
-    S += P
-    for _ in range(1, B.shape[0]):
-        P = P @ B
-        S += P 
-        if (S > 0).all():
-            return True
-
-    return False
 
 
 @dataclass
@@ -133,9 +114,8 @@ def getch():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     return ch
 
-def random_state(k):
+def random_state(n, k):
     min_float = np.nextafter(0,1)
-    n = 3
 
     def susceptible_and_adopters():
         a = np.zeros((k,n))
@@ -169,15 +149,8 @@ def random_state(k):
     state = State(
     n=n,
     K=k,
-    W_p=np.array([
-        [0,1,0],
-        [0.5,0,0.5],
-        [0,1,0]]),
-
-    W_np=np.array([
-        [0,0,1],
-        [0,0,1],
-        [0.5,0.5,0]]),
+    W_p=random_graphs.erdos_renyi(n, must_be_irreducible=True),
+    W_np=random_graphs.erdos_renyi(n),
     s=susceptible,
     a=adopters,
     d=np.zeros((k,n)),
@@ -197,23 +170,23 @@ def random_state(k):
     assert state.lambd.shape == (k,) and state.xi.shape == (k,)
     for i in range(k):
         assert (state.lambd[i] >= 0) and (state.xi[i] >= 0) and (state.lambd[i] + state.xi[i] < 1)
-    assert (state.W_p @ np.ones(n) == np.ones(n)).all(), "W_p not row-stoc"
-    assert (state.W_np @ np.ones(n) == np.ones(n)).all(), "W_np not row-stoc"
-    assert irreducible(state.W_p), "W_p not strongly connected"
+    assert np.allclose(state.W_p @ np.ones(n),  np.ones(n)), "W_p not row-stoc"
+    assert np.allclose(state.W_np @ np.ones(n), np.ones(n)), "W_np not row-stoc"
+    assert mu.irreducible(state.W_p), "W_p not strongly connected"
     return state
 
 
 def main(pid):
     p = argparse.ArgumentParser()
     p.add_argument("--rounds", type=int, default=8)
-    p.add_argument("--V", type=int, default=2)
+    p.add_argument("--n", type=int, default=2)
     p.add_argument("--K", type=int, default=2)
     p.add_argument("--file-name", default="oriented_hypergraph_data")
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--no-output",action="store_true")
     a = p.parse_args()
 
-    state = random_state(a.K)
+    state = random_state(a.n, a.K)
     show_state(state)
     while(getch() != 'q'):
         state.tick()
