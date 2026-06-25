@@ -6,7 +6,6 @@ import random_graphs
 import sys, tty, termios
 
 
-
 @dataclass
 class State:
     n:  int
@@ -162,6 +161,8 @@ def random_state(n, k):
         return l, xi
 
 
+
+
     lambd, xi = opinion_scalers()
     susceptible, adopters = susceptible_and_adopters()
 
@@ -181,7 +182,7 @@ def random_state(n, k):
     beta  = opinion_rates(),
     gamma = np.random.uniform(min_float, 0.1, (k,n)),
 
-    delta = np.random.uniform(0,1,(k,n))
+    delta = np.random.rand(k,n)
             )
 
     assert ((state.beta.T @ np.ones(k) > 0).all()) and \
@@ -210,11 +211,11 @@ def main(pid):
     state = random_state(a.n, a.K)
     if a.test:
         state.tick(a.test)
-
-    show_state(state)
-    while(getch() != 'q'):
-        state.tick()
+    else:
         show_state(state)
+        while(getch() != 'q'):
+            state.tick()
+            show_state(state)
 
 
 if __name__ == "__main__":
