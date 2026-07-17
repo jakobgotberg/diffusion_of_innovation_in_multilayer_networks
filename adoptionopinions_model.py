@@ -1,227 +1,202 @@
-import random, argparse, time, csv, os, statistics
-from dataclasses import dataclass
+import random, argparse, time, csv, os, statistics, sys, itertools, copy
+from IPython.display import clear_output, display
+import matplotlib.pyplot as plt
+from dataclasses import dataclass, field
 import numpy as np
-
+import matrix_utils as mu
+import random_graphs
 import sys, tty, termios
 
-def irreducible(B):
-    '''
-    Checks irriducibility of nonnegative matrices.
-    If sum of M^k, k < n-1 is positive, the whole sum
-    must be positive.
-    '''
-    n = B.shape[0]
 
-    S = np.zeros((n, n), dtype=float)
-    P = np.eye(n, dtype=float)
-
-    # sum_{k = 0}^{n-1} 
-    S += P
-    for _ in range(1, B.shape[0]):
-        P = P @ B
-        S += P 
-        if (S > 0).all():
-            return True
-
-    return False
-
-
-@dataclass
-class State:
+@dataclass(frozen=True)
+class Simulation_constants:
     n:  int
     K:  int
-    W_p : np.ndarray # physical layer (adaption)
-    W_np: np.ndarray # non-physical layer (opinion)
-    s: np.ndarray # n-vector of floats
-    # All arrays below are K times n floats
-    a: np.ndarray
-    d: np.ndarray
-    x: np.ndarray
-    x0: np.ndarray
-    '''
-    homogenous system, all scalars are identical, i.e., vectors below are of K dim.
-    '''
+    W: np.ndarray # physical layer (adaption)
+    V: np.ndarray # non-physical layer (opinion)
     lambd : np.ndarray  # (non-physical) opinion influence
     xi    : np.ndarray  # (non-physical) adoption influence
     beta  : np.ndarray  # (pysical) adoption influence from susceptible
     gamma : np.ndarray  # (pysical) adoption influence from dissatisfied
     delta : np.ndarray  # (pysical) dissatisfaction rate
-    t:  int = 0
+    x0    : np.ndarray  # initial opinions
+    alfa  : np.ndarray = field(init=False)
 
-    def adoptions(self):
-        def to_list(c):
-            return [ (c[k] @ np.ones(self.n)) / self.n for k in range(self.K)]
-        return to_list(self.a), to_list(self.d)
+    def __post_init__(self):
+        object.__setattr__(self, "alfa", np.ones((self.K, self.n)) - self.lambd -self.xi)
 
-    def tick(self):
-        # TODO: improve/remove these functions
-        def B(k):
-            ret = np.diag([self.beta[k]] * self.n)
-            return ret
+@dataclass(eq=False)
+class State:
+    s : np.ndarray
+    a : np.ndarray
+    d : np.ndarray
+    x : np.ndarray
 
-        def X(k):
-            return np.diag([self.x[k]] * self.n)
-        def D(k):
-            return np.diag([self.delta[k]] * self.n)
-        def T(k):
-            return np.diag([self.gamma[k]] * self.n)
-        def L(k):
-            ret = np.diag([self.lambd[k]] * self.n)
-            return ret
+    def __repr__(self):
+        return f"susceptible: {self.s}\nadopters:{self.a}\ndissatisfied:{self.d}\nopinions:{self.x}"
 
-        def Xi(k):
-            return np.diag([self.xi[k]] * self.n)
+    def __call__(self, consts):
+        next_s = np.zeros(self.s.shape[0])
+        next_a = np.zeros((self.a.shape[0], self.a.shape[1]))
+        next_d = np.zeros((self.d.shape[0], self.d.shape[1]))
+        next_x = np.zeros((self.x.shape[0], self.x.shape[1]))
 
-        def opinion_inf(k):
-            return self.W_np @ self.x[k]
-        def adoption_inf(k):
-            return self.W_p @ self.a[k]
+        # equation (1a)
+        next_s = self.s - sum(np.diag(self.s) @ np.diag(consts.beta[k]) @ np.diag(self.x[k]) @ consts.W @ self.a[k] for k in range(consts.K))
+        if (next_s < 0).any():
+            raise Exception("s", next_s)
 
-        def s_next():
-            #TODO: list decomp
-            ret = 0
-            for k in range(self.K):
-                ret += np.diag(self.s) @ B(k) @ X(k) @ adoption_inf(k)
-            return -ret
+        for k in range(consts.K):
+            # equation (1b)
+            next_a[k] = self.a[k] \
+                    + np.diag(consts.beta[k]) @ np.diag(self.x[k]) @ np.diag(self.s) @ consts.W @ self.a[k] \
+                    - np.diag(consts.delta[k]) @ self.a[k] \
+                    + np.diag(consts.gamma[k]) @ np.diag(self.x[k]) @ sum(self.d[j] for j in range(consts.K) if j != k)
+            if (next_a[k] < 0).any():
+                raise Exception("a", next_a[k])
 
-        def a_next(k):
-            # TODO: make 'dissat' a list decomp
-            dissat = np.zeros_like(self.d[k])
-            for i in range(self.K):
-                if i == k:
-                    continue
-                dissat += self.d[i]
+            # equation (1c)
+            next_d[k] = self.d[k] \
+                    - sum(np.diag(consts.gamma[j]) @ np.diag(self.x[j]) for j in range(consts.K) if j != k) @ self.d[k] \
+                    + np.diag(consts.delta[k]) @ self.a[k]
+            if (next_d[k] < 0).any():
+                raise Exception("d", next_d[k])
 
-            return -(D(k) @ self.a[k]) + T(k) @ X(k) @ dissat + B(k) @ X(k) @ np.diag(self.s) @ adoption_inf(k)
+            # equation (1d)
+            next_x[k] = consts.alfa[k] @ consts.x0[k] \
+                    + np.diag(consts.lambd[k]) @ consts.V @ self.x[k] \
+                    + np.diag(consts.xi[k]) @ consts.W @ self.a[k]
+            if (next_x[k] < 0).any():
+                raise Exception("x", next_x[k])
 
-        def d_next(k):
-            # TODO: list decomp
-            to_adopt = np.zeros_like(T(k))
-            for i in range(self.K):
-                if i == k:
-                    continue
-                to_adopt += T(i) @ X(i)
-            return -(to_adopt @ self.d[k]) + D(k) @ self.a[k]
+        return State(next_s, next_a, next_d, next_x)
+        
+        
 
-        def x_next(k):
-            return L(k) @ opinion_inf(k) + Xi(k) @ adoption_inf(k)
+class Simulation:
 
-        self.s = self.s + s_next()
-        for k in range(self.K):
-            self.a[k] = self.a[k] + a_next(k)
-            self.d[k] = self.d[k] + d_next(k)
-            self.x[k] = (np.eye(self.n) - L(k) - Xi(k)) @ self.x0[k] + x_next(k)
+    constants : Simulation_constants
+    states : list[State] = field(default_factory=list)
+    max_states : int = 2048
+    min_converge_check : int = 128
+    converge_check_window_size : int = 32
+    converge_check_atol = 1e-2
 
-        self.t += 1
+    def __init__(self, n, k, W, V, lambd, xi, beta, gamma, delta, s, a, d, x):
+        self.constants = Simulation_constants(n=n, K=k, W=W, V=V, lambd=lambd, xi=xi, beta=beta, gamma=gamma, delta=delta, x0=x)
+        self.states = [(State(s,a,d,x))]
 
+    def __call__(self, plot=False):
+        if len(self.states) <= self.max_states:
+            self.states.append( self.states[-1](self.constants) )
+        else:
+            return False
 
-def show_state(state):
-    print(f't: {state.t}')
-    a, d = state.adoptions()
-    for k in range(state.K):
-        print(f'a[{k}]: {a[k]:.3f}')
-        print(f'd[{k}]: {d[k]:.3f}')
-    print()
+        if plot:
+            clear_output(wait=True)
+            plt.figure()
+            t = range(len(self.states))
+            for k in range(self.constants.K):
+                plt.plot(t, [state.a[k].mean(axis=0) for state in self.states], label=f"a{k}")
+               
+            plt.xlabel("Time")
+            plt.ylabel("Ratio")
+            plt.legend()
+            plt.show()
+            #clear_output(wait=True)
 
-def getch():
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return ch
+        if (len(self.states) > self.min_converge_check and \
+                np.isclose(np.sum([state.a for state in self.states[-self.converge_check_window_size:]], axis=0), \
+                self.converge_check_window_size * self.states[-1].a, atol=self.converge_check_atol).all()):
+            return True
+        return False
 
-def random_state(k):
+    def __repr__(self):
+        dominant_index, dominant_ratio = max(((k, self.states[-1].a[k].mean(axis=0)) for k in range(self.constants.K)), key=lambda x: x[1])
+        return f"Technology nr {dominant_index} dominates, {dominant_ratio * 100:.3f}% of the population is using the technology."
+
+def simulation_factory(n, k):
     min_float = np.nextafter(0,1)
-    n = 3
 
     def susceptible_and_adopters():
         a = np.zeros((k,n))
         s = np.ones(n)
-        for i in range(a.shape[1]):
-            while((r := np.random.standard_exponential()) > 0.1):
-                pass
-            a[np.random.randint(k)][i] = r
-            s[i] -= r
+        # Go column by column, each sum(col) in (0,1), subtract the sum from s[k]
+        for j in range(n):
+            while(True):
+                a[:,j] = 1/10 * np.random.standard_exponential(k)
+                if (0 < sum(a[:,j]) <= 1):
+                    s[j] = s[j] - sum(a[:,j])
+                    break
         return s, a
+
+    def opinion_rates():
+        '''
+        Beta in k x n, the col sum must be in (0,1)
+        '''
+        B = np.zeros((k,n))
+        for j in range(n):
+            while(True):
+                B[:,j] = (1/n) * np.random.rand(k)
+                if (0 < sum(B[:,j]) < 1):
+                    break
+        return B
 
     def opinion_scalers():
         '''
         lambd_i, xi_i >= 0, lambd_i + xi_i < 1
         '''
-        v = np.random.rand(2, k)
-        for i in range(v.shape[1]):
-            a,b = v[:,i]
-            while (a + b >= 1):
-                a,b = np.random.rand(2)
-            v[:,i] = (a,b)
-        lambd = v[0]
-        xi = v[1]
-        return lambd, xi
+        l = np.random.rand(k,n)
+        xi = np.random.rand(k,n)
+        for e in itertools.product(range(k), range(n)):
+            # 'e' is the Cartesian product of k and n, i.e., all indexes of 
+            # the matries
+            while (l[e[0]][e[1]] + xi[e[0]][e[1]] >= 1):
+                l[e[0]][e[1]], xi[e[0]][e[1]] = np.random.rand(2)
+        return l, xi
+
+
 
 
     lambd, xi = opinion_scalers()
     susceptible, adopters = susceptible_and_adopters()
+    beta  = opinion_rates()
+
+    W=random_graphs.erdos_renyi(n, must_be_irreducible=True)
+    V=random_graphs.erdos_renyi(n, must_be_irreducible=True)
+    d=np.zeros((k,n))
+    x= np.random.uniform(min_float, 1, size=(k, n))
+    gamma = np.random.uniform(min_float, 0.1, (k,n))
+    delta = np.random.rand(k,n)
 
 
-    state = State(
+    assert ((beta.T @ np.ones(k) > 0).all()) and \
+        ((beta.T @ np.ones(k) < 1).all()), "Beta is not in allowed range"
+    assert ((delta >= 0).all() and (delta <= 1).all())
+    assert ((susceptible >= 0).all()     and (susceptible <= 1).all())
+    assert ((adopters >= 0).all()     and (adopters <= 1).all())
+    assert lambd.shape == (k,n) and xi.shape == (k,n)
+    for i in range(k):
+        assert (lambd >= 0).all() and (xi >= 0).all() and (lambd + xi < 1).all()
+    assert np.allclose(W @ np.ones(n),  np.ones(n)), "W is not row-stoc"
+    assert np.allclose(V @ np.ones(n), np.ones(n)), "V is not row-stoc"
+    assert mu.irreducible(W), "W not strongly connected"
+    assert mu.irreducible(V), "V not strongly connected"
+
+    return Simulation(
     n=n,
-    K=k,
-    W_p=np.array([
-        [0,1,0],
-        [0.5,0,0.5],
-        [0,1,0]]),
-
-    W_np=np.array([
-        [0,0,1],
-        [0,0,1],
-        [0.5,0.5,0]]),
+    k=k,
+    W=W,
+    V=V,
     s=susceptible,
     a=adopters,
-    d=np.zeros((k,n)),
-    x=np.zeros((k,n)),
-    x0=np.random.uniform(min_float, 1, size=(k, n)),
+    d=d,
+    x= x,
     lambd = lambd,
     xi = xi,
-    beta  = np.random.uniform(min_float, 1, k),
-    gamma = np.random.uniform(min_float, 1, k),
+    beta  = beta,
+    gamma = gamma,
 
-    delta = np.random.uniform(0,1,k)
+    delta = np.random.rand(k,n)
             )
 
-    assert ((state.delta >= 0).all() and (state.delta <= 1).all())
-    assert ((state.s >= 0).all()     and (state.s <= 1).all())
-    assert ((state.a >= 0).all()     and (state.a <= 1).all())
-    assert state.lambd.shape == (k,) and state.xi.shape == (k,)
-    for i in range(k):
-        assert (state.lambd[i] >= 0) and (state.xi[i] >= 0) and (state.lambd[i] + state.xi[i] < 1)
-    assert (state.W_p @ np.ones(n) == np.ones(n)).all(), "W_p not row-stoc"
-    assert (state.W_np @ np.ones(n) == np.ones(n)).all(), "W_np not row-stoc"
-    assert irreducible(state.W_p), "W_p not strongly connected"
-    return state
-
-
-def main(pid):
-    p = argparse.ArgumentParser()
-    p.add_argument("--rounds", type=int, default=8)
-    p.add_argument("--V", type=int, default=2)
-    p.add_argument("--K", type=int, default=2)
-    p.add_argument("--file-name", default="oriented_hypergraph_data")
-    p.add_argument("--verbose",action="store_true")
-    p.add_argument("--no-output",action="store_true")
-    a = p.parse_args()
-
-    state = random_state(a.K)
-    show_state(state)
-    while(getch() != 'q'):
-        state.tick()
-        show_state(state)
-
-
-if __name__ == "__main__":
-    t_program_start = time.perf_counter()
-    pid = str(os.getpid())
-    main(pid)
-    print(f"\n{pid} Runtime: {(time.perf_counter() - t_program_start)/60:.1f} min")
