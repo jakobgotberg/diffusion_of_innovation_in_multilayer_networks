@@ -1,5 +1,16 @@
 import numpy as np
 
+def algebraic_connectivity(B):
+    assert (B == B.T).all()
+    n = B.shape[0]
+    C = (B > 0).astype(int)
+    L = np.diag(C @ np.ones(n)) - C
+    return sorted(np.linalg.eigvals(L))[1]
+
+def row_stochastic(B):
+    n = B.shape[0]
+    return (np.isclose(B @ np.ones(n), np.ones(n))).all()
+
 def irreducible(B):
     '''
     Checks irriducibility of nonnegative matrices.
