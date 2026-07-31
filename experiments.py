@@ -1,143 +1,223 @@
-import argparse, os, time, math, itertools
-from dataclasses import dataclass, field, asdict
-from adoptionopinions_model import simulation_factory, Simulation, Simulation_constants, Initial_state, homogenous_simulation_factory
-import random_graphs as rg
-import matrix_utils as mu
+import argparse, os, time, pickle
+from dataclasses import dataclass, field
+from datetime import datetime
+from multiprocessing import SimpleQueue, Process
+
 import numpy as np
-import json
+import pandas as pd
 
-@dataclass
-class Conn_and_dom():
-    degree : int
-    connetivity : float
-    adoption_ratio : float
-
-@dataclass()
-class Connectiviy_experiment_data():
-    inial_state : Initial_state
-    constants : Simulation_constants
-    social_network : np.ndarray
-    data : list[Conn_and_dom] = field(default_factory=list, init=False)
+from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Simulation_constants, Initial_state, Networks
+from networks import regular_lattice, random_complete, ring, influencer_network
 
 
-def connectivity_and_dominance_exp(n,k,constants, initial_states, V):
-
-    
-    def opinion_scalers():
-
-        '''
-        lambd_i, xi_i >= 0, lambd_i + xi_i < 1
-        '''
-        l = np.random.rand(k,n)
-        xi = np.random.rand(k,n)
-        for e in itertools.product(range(k), range(n)):
-            # 'e' is the Cartesian product of k and n, i.e., all indexes of 
-            # the matries
-            while l[e[0]][e[1]] + xi[e[0]][e[1]] >= 1:
-                l[e[0]][e[1]], xi[e[0]][e[1]] = np.random.rand(2)
-
-        return l, xi
-
-    lambd, xi = opinion_scalers()
-    experiment_results = Connectiviy_experiment_data(initial_states, constants, V)
-
-    number_of_neighbors = [2**i for i in range(1, int(np.log2(n))+1)]
-    for degree in number_of_neighbors:
-        W = rg.regular_lattice(n, degree)
-        conn = mu.algebraic_connectivity(W)
-        assert mu.irreducible(W) and mu.irreducible(V)
-        assert mu.row_stochastic(W) and mu.row_stochastic(V)
-        
-        constants.set_beta( np.array([[np.log2(degree)/int(np.log2(number_of_neighbors[-1]))] * n for _ in range(k)]))
-        
-        sim = Simulation(constants, W, V, *initial_states())
-        while (not sim()):
-            pass
-        experiment_results.data.append(Conn_and_dom(degree, conn,sim.states[-1].a[0].mean(axis=0)))
-
-
-    #print(f"Constants: {experiment_results.constants}")
-    for d in experiment_results.data:
-        print(f"{d.adoption_ratio:.5f}")
-
-    return experiment_results
+T = 12
 
 
 @dataclass()
-class Exp():
+class Experiment:
+    experiment_id : str
     n : int
-    inial_state : Initial_state
-    constants : Simulation_constants
-    social_network : np.ndarray
-    physical_network : np.ndarray
-    NMAE : float
-
-def fitting():
-    import os, pickle
-    import pandas as pd
-    def NMAE(y, y_hat):
-        return np.mean(np.abs(y - y_hat)) / np.mean(y)
-    
-    df = pd.read_csv("../os_combined-ww-monthly-201407-202605.csv")
-    df = df['Windows'] / 100
-    experiments = []
-    rows = len(df)
-    for i in range(1_000):
-        n = np.random.randint(3,20)
-        constants, IS = simulation_factory(n, 2, dislike_tech_2=True)
-        W, V = rg.erdos_renyi(n, True), rg.erdos_renyi(n, True)
-        sim = Simulation(constants, W, V, *IS())
-        sim.max_states = rows
-        sim.min_converge_check = rows + 1
-        while (not sim()):
-            pass
-        ss = [state.a[0].mean() for state in sim.states[:rows]]
-        nmae = NMAE(df, ss)
-        exp = Exp(n, IS, constants, V, W, nmae)
-        experiments.append(exp)
-
-    experiments = sorted(experiments, key=lambda x: x.NMAE)
-    filename = "best.pkl"
-    if os.path.isfile(filename):
-        with open(filename, "rb") as file_desc:
-            if pickle.load(file_desc).NMAE < experiments[0].NMAE:
-                print("sorry")
-                return
-        with open(filename, "wb") as file_desc:
-            print(f"New best model: {experiments[0].NMAE}")
-            pickle.dump(experiments[0], file_desc)
-    else:
-        with open(filename, "wb") as file_desc:
-            print("first time buyer")
-            pickle.dump(experiments[0], file_desc)
+    k : int
+    trials : list[Trial] = field(default_factory=list, init=False)
 
 
-    
+@dataclass(frozen=True)
+class Trial:
+    variable_value : int
+    a_converged_at : int
+    x_converged_at : int
+    a_steady_state : np.ndarray
+    x_steady_state : np.ndarray
+
+
+@dataclass(frozen=True)
+class Connectivity_experiment_data_point:
+    network : str
+    self_loops : bool
+    relative_degree : float
+    relative_a_convergence : float
+    relative_x_convergence : float
+    a_steady_state_distribution : np.ndarray
+    x_steady_state_distribution : np.ndarray
+
+@dataclass(frozen=True)
+class Influencer_experiment_data_point:
+    network : str
+    relative_n_influencers : float
+    relative_a_convergence : float
+    relative_x_convergence : float
+    a_steady_state_distribution : np.ndarray
+    x_steady_state_distribution : np.ndarray
+
+def degrees(n):
+    return np.unique(sorted([g + 1 if g % 2 != 0 else g for g in [int(np.sqrt(2)**i) for i in range(T)] if 1<g<n]) + [n])
+
+
+def printing(ix, trials) -> None:
+    def preamble(p,c,typ):
+        if p:
+            p = p.a_converged_at if typ == "a" else p.x_converged_at
+            c = c.a_converged_at if typ == "a" else c.x_converged_at
+            return "\033[33m[increase] " if p < c else "\033[34m[decrease] " if p > c else "\033[37m"
+        return "\033[37m"
+
+    a = trials[-1].a_steady_state.mean(axis=1)
+    x = trials[-1].x_steady_state.mean(axis=1)
+    prev, current = (trials[-2], trials[-1]) if len(trials) > 1 else (trials[-1], trials[-1]) 
+    print(f"{ix:2} - " + \
+            preamble(prev, current, "a") + \
+            f"Tech conv. at {current.a_converged_at}" + \
+            f"\33[32m Tech {np.argmax(a)} at {a[np.argmax(a)]*100:.2f}%" + \
+            "\33[0m" + " | " + \
+            preamble(prev, current, "x") + \
+            f"Ops conv. at {current.x_converged_at}" + \
+            f"\33[32m Op {np.argmax(x)} at {x[np.argmax(x)]*100:.2f}%" + \
+            "\33[0m"
+          )
+
+
+def run_influencer_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool):
+    data = []
+    for i in range(rounds):
+
+        experiment = Experiment(
+                experiment_id=f"{pid}{time.time_ns()}",
+                n=n, 
+                k=k)
+        SC = random_simulation_constants_factory(n, k, x0=np.array([[0.1] * n] * k))
+        print(f"({i+1} of {rounds})" + "INFLUENCER" + "-" * 10 + f" n:{n},k:{k} " + "-" * 10)
+        W = random_complete(n)
+        influencers = np.random.permutation(n)
+        for n_influencers in range(1, n+5, 4):
+            IS = initial_state_factory(
+                                    n, 
+                                    k, 
+                                    adopters=influencers[:n_influencers],
+                                    influencers=influencers[:n_influencers]
+                                    )
+            SC.set_x0(IS.x)
+            V = influencer_network(n, influencers[:n_influencers])
+            sim = Simulation(
+                    simulation_constants = SC,
+                    initial_states = IS,
+                    net = Networks(W=W, V=V)
+                    )
+            while not sim():
+                pass
+            trial = Trial(
+                        variable_value = n_influencers,
+                        a_converged_at = sim.get_adoption_convergence_point(),
+                        x_converged_at = sim.get_opinion_convergence_point(),
+                        a_steady_state = sim.get_adoption_steady_state(),
+                        x_steady_state = sim.get_opinion_steady_state()
+                        )
+            experiment.trials.append(trial)
+            printing(n_influencers, experiment.trials)
+
+        max_inf = max([trial.variable_value for trial in experiment.trials])
+        max_a_convergence = max([trial.a_converged_at for trial in experiment.trials])
+        max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
+
+        for trial in experiment.trials:
+            data.append(
+                    dict(
+                        network=network,
+                        self_loops=True,
+                        relative_value=trial.variable_value/max_inf,
+                        relative_a_convergence=trial.a_converged_at / max_a_convergence,
+                        relative_x_convergence=trial.x_converged_at / max_x_convergence,
+                        a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
+                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1)
+                    )
+                    )
+    queue.put(data)
+
+def run_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool):
+    data = []
+
+    for i in range(rounds):
+
+        t0 = time.perf_counter()
+        experiment = Experiment(
+                experiment_id=f"{pid}{time.time_ns()}",
+                n=n,
+                k=k)
+        start = np.random.randint(0,n)
+        IS = initial_state_factory(n, k, adopters=[start], influencers=[start])
+        SC = random_simulation_constants_factory(n, k, IS.x)
+        gen_t = time.perf_counter() - t0
+        print(f"({i+1} of {rounds}) -- (network: {network}) " + f"self-loops: {self_loops} " + \
+                "-" * 10 + f" n:{n},k:{k} " + "-" * 10 + f" (Generation: {gen_t:.3f} s)")
+        RC = random_complete(n)
+
+        for degree in degrees(n):
+            RL = regular_lattice(n, degree, self_loop=self_loops)
+            W, V = (RL, RC) if network == "physical" else (RC, RL) if network == "virtual" else (None, None)
+
+            sim = Simulation(
+                    simulation_constants = SC,
+                    initial_states = IS,
+                    net = Networks(W=W, V=V)
+                    )
+            while not sim():
+                pass
+            trial = Trial(
+                        variable_value = np.count_nonzero(W if network == "physical" else V) / n,
+                        a_converged_at = sim.get_adoption_convergence_point(),
+                        x_converged_at = sim.get_opinion_convergence_point(),
+                        a_steady_state = sim.get_adoption_steady_state(),
+                        x_steady_state = sim.get_opinion_steady_state()
+                        )
+            experiment.trials.append(trial)
+            printing(degree, experiment.trials)
+
+        max_degree = max([trial.variable_value for trial in experiment.trials])
+        max_a_convergence = max([trial.a_converged_at for trial in experiment.trials])
+        max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
+
+        for trial in experiment.trials:
+            data.append(
+                    dict(
+                        network=network,
+                        self_loops=self_loops,
+                        relative_value=trial.variable_value/max_degree,
+                        relative_a_convergence=trial.a_converged_at / max_a_convergence,
+                        relative_x_convergence=trial.x_converged_at / max_x_convergence,
+                        a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
+                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1)
+                    )
+                    )
+    queue.put(data)
 
 def main(pid):
     p = argparse.ArgumentParser()
-    p.add_argument("--file-name", default="oriented_hypergraph_data")
-    p.add_argument("--rounds", type=int, default=8)
-    p.add_argument("--fitting", action="store_true")
+    p.add_argument("--n", type=int, default=100)
+    p.add_argument("--k", type=int, default=3)
+    p.add_argument("--network", choices=["physical", "virtual", "influencer"], required=True)
+    p.add_argument("--self-loops",action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--rounds", type=int, default=2)
+    p.add_argument("--procs", type=int, default=1)
     a = p.parse_args()
+    s = "_self_loops" if a.self_loops else ""
+    filename = "data_" + a.network + f"_{pid}_" + datetime.now().strftime("%B_%d__%H_%M") + s + ".csv"
 
-    n = 129
-    k = 2
+    data_list = []
+    procs_done = 0
+    queue = SimpleQueue()
+    work = run_experiment if not a.network == "influencer" else run_influencer_experiment
+    args = (pid, queue, a.n, a.k, a.rounds, a.network, a.self_loops)
+
+    for _ in range(a.procs):
+        Process(target=work, args=args).start() 
+    while procs_done < a.procs:
+        data_list.append(queue.get())
+        procs_done += 1
         
-    if a.fitting:
-        fitting()
-        return
 
-    constants, initial_states = homogenous_simulation_factory(n,k, val=0.1)
-    V = rg.regular_lattice(n, n-1)
 
-    experiments = []
-    for i in range(a.rounds):
-        experiments.append(connectivity_and_dominance_exp(n, k, constants, initial_states, V))
-        print()
-    df = pd.DataFrame([asdict(p) for p in experiments])
+    df = pd.DataFrame([data_point for data in data_list for data_point in data])
 
-    #df.to_csv("people.csv", index=False)
+    df.to_csv(filename, index=False)
 
 if __name__ == "__main__":
     t_program_start = time.perf_counter()
