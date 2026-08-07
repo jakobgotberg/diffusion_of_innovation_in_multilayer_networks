@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Simulation_constants, Initial_state, Networks
-from networks import regular_lattice, random_complete, ring, influencer_network
+from networks import regular_lattice, random_complete, ring, influencer_network, complete, directed_lattice
 
 
 T = 12
@@ -49,11 +49,8 @@ class Influencer_experiment_data_point:
     a_steady_state_distribution : np.ndarray
     x_steady_state_distribution : np.ndarray
 
-def degrees(n):
-    return np.unique(sorted([g + 1 if g % 2 != 0 else g for g in [int(np.sqrt(2)**i) for i in range(T)] if 1<g<n]) + [n])
 
-
-def printing(ix, trials) -> None:
+def printing(pid, ix, trials) -> None:
     def preamble(p,c,typ):
         if p:
             p = p.a_converged_at if typ == "a" else p.x_converged_at
@@ -64,7 +61,7 @@ def printing(ix, trials) -> None:
     a = trials[-1].a_steady_state.mean(axis=1)
     x = trials[-1].x_steady_state.mean(axis=1)
     prev, current = (trials[-2], trials[-1]) if len(trials) > 1 else (trials[-1], trials[-1]) 
-    print(f"{ix:2} - " + \
+    print(f"({pid}) " + f"{ix:2} - " + \
             preamble(prev, current, "a") + \
             f"Tech conv. at {current.a_converged_at}" + \
             f"\33[32m Tech {np.argmax(a)} at {a[np.argmax(a)]*100:.2f}%" + \
@@ -76,81 +73,17 @@ def printing(ix, trials) -> None:
           )
 
 
-def run_influencer_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool):
-    data = []
-    for i in range(rounds):
-
-        experiment = Experiment(
-                experiment_id=f"{pid}{time.time_ns()}",
-                n=n, 
-                k=k)
-        SC = random_simulation_constants_factory(n, k, x0=np.array([[0.1] * n] * k))
-        print(f"({i+1} of {rounds})" + "INFLUENCER" + "-" * 10 + f" n:{n},k:{k} " + "-" * 10)
-        W = random_complete(n)
-        influencers = np.random.permutation(n)
-        for n_influencers in range(1, n+5, 4):
-            IS = initial_state_factory(
-                                    n, 
-                                    k, 
-                                    adopters=influencers[:n_influencers],
-                                    influencers=influencers[:n_influencers]
-                                    )
-            SC.set_x0(IS.x)
-            V = influencer_network(n, influencers[:n_influencers])
-            sim = Simulation(
-                    simulation_constants = SC,
-                    initial_states = IS,
-                    net = Networks(W=W, V=V)
-                    )
-            while not sim():
-                pass
-            trial = Trial(
-                        variable_value = n_influencers,
-                        a_converged_at = sim.get_adoption_convergence_point(),
-                        x_converged_at = sim.get_opinion_convergence_point(),
-                        a_steady_state = sim.get_adoption_steady_state(),
-                        x_steady_state = sim.get_opinion_steady_state()
-                        )
-            experiment.trials.append(trial)
-            printing(n_influencers, experiment.trials)
-
-        max_inf = max([trial.variable_value for trial in experiment.trials])
-        max_a_convergence = max([trial.a_converged_at for trial in experiment.trials])
-        max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
-
-        for trial in experiment.trials:
-            data.append(
-                    dict(
-                        network=network,
-                        self_loops=True,
-                        relative_value=trial.variable_value/max_inf,
-                        relative_a_convergence=trial.a_converged_at / max_a_convergence,
-                        relative_x_convergence=trial.x_converged_at / max_x_convergence,
-                        a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
-                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1)
-                    )
-                    )
-    queue.put(data)
-
-def run_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool):
-    data = []
-
-    for i in range(rounds):
-
+def run_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool, verbose:bool, disobej_eq18:bool):
+    np.random.seed(None)
+    increments = [2**i for i in range(1,11)]
+    def lattice(experiment):
         t0 = time.perf_counter()
-        experiment = Experiment(
-                experiment_id=f"{pid}{time.time_ns()}",
-                n=n,
-                k=k)
-        start = np.random.randint(0,n)
-        IS = initial_state_factory(n, k, adopters=[start], influencers=[start])
-        SC = random_simulation_constants_factory(n, k, IS.x)
-        gen_t = time.perf_counter() - t0
-        print(f"({i+1} of {rounds}) -- (network: {network}) " + f"self-loops: {self_loops} " + \
-                "-" * 10 + f" n:{n},k:{k} " + "-" * 10 + f" (Generation: {gen_t:.3f} s)")
+        IS = initial_state_factory(n, k, adopters=None, influencers=None)
+        SC = random_simulation_constants_factory(n, k, IS.x, obej_eq_18=not disobej_eq18)
         RC = random_complete(n)
+        print(f"\tgen: {abs(t0-time.perf_counter()):.3f} s")
 
-        for degree in degrees(n):
+        for degree in increments:
             RL = regular_lattice(n, degree, self_loop=self_loops)
             W, V = (RL, RC) if network == "physical" else (RC, RL) if network == "virtual" else (None, None)
 
@@ -169,9 +102,60 @@ def run_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network
                         x_steady_state = sim.get_opinion_steady_state()
                         )
             experiment.trials.append(trial)
-            printing(degree, experiment.trials)
+            if verbose:
+                printing(pid, degree, experiment.trials)
 
         max_degree = max([trial.variable_value for trial in experiment.trials])
+        return max_degree
+
+    def influencer(experiment):
+        SC = random_simulation_constants_factory(n, k, x0=np.random.rand(k,n), obej_eq_18=not disobej_eq18)
+        W = random_complete(n)
+        influencers = [i for i in range(n)]
+        for n_influencers in [1] + increments:
+            IS = initial_state_factory(
+                                    n, 
+                                    k, 
+                                    adopters=[0], #influencers[:n_influencers],
+                                    influencers=[0],#influencers[:n_influencers]
+                                    )
+            SC.set_x0(IS.x)
+            V = influencer_network(n, influencers[:n_influencers])
+            sim = Simulation(
+                    simulation_constants = SC,
+                    initial_states = IS,
+                    net = Networks(W=W, V=V)
+                    )
+            while not sim():
+                pass
+            trial = Trial(
+                        variable_value = n_influencers,
+                        a_converged_at = sim.get_adoption_convergence_point(),
+                        x_converged_at = sim.get_opinion_convergence_point(),
+                        a_steady_state = sim.get_adoption_steady_state(),
+                        x_steady_state = sim.get_opinion_steady_state()
+                        )
+            experiment.trials.append(trial)
+            if verbose:
+                printing(pid, n_influencers, experiment.trials)
+
+        max_inf = max([trial.variable_value for trial in experiment.trials])
+        return max_inf
+
+    data = []
+    pid = os.getpid()
+    for i in range(rounds):
+        s = f" self-loops: {self_loops} " if network != "influencer" else ""
+        print(f"({pid})" + f" ({i+1} of {rounds}) -- (network: {network}) " + \
+                "-" * 2 + f" n:{n},k:{k} " + "-" * 2 + s, end="")
+
+        experiment = Experiment(
+                experiment_id=f"{pid}{time.time_ns()}",
+                n=n,
+                k=k)
+
+        # The inner functions have side effects to update the 'experiment' object
+        max_value = influencer(experiment) if network == "influencer" else lattice(experiment)
         max_a_convergence = max([trial.a_converged_at for trial in experiment.trials])
         max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
 
@@ -180,7 +164,7 @@ def run_experiment(pid:int, queue:SimpleQueue, n:int, k:int, rounds:int, network
                     dict(
                         network=network,
                         self_loops=self_loops,
-                        relative_value=trial.variable_value/max_degree,
+                        relative_value=trial.variable_value/max_value,
                         relative_a_convergence=trial.a_converged_at / max_a_convergence,
                         relative_x_convergence=trial.x_converged_at / max_x_convergence,
                         a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
@@ -197,26 +181,30 @@ def main(pid):
     p.add_argument("--self-loops",action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--rounds", type=int, default=2)
     p.add_argument("--procs", type=int, default=1)
+    p.add_argument("--disobej-eq18",action=argparse.BooleanOptionalAction, default=False)
     a = p.parse_args()
     s = "_self_loops" if a.self_loops else ""
     filename = "data_" + a.network + f"_{pid}_" + datetime.now().strftime("%B_%d__%H_%M") + s + ".csv"
 
     data_list = []
-    procs_done = 0
     queue = SimpleQueue()
-    work = run_experiment if not a.network == "influencer" else run_influencer_experiment
-    args = (pid, queue, a.n, a.k, a.rounds, a.network, a.self_loops)
+    work = run_experiment
+    args = (queue, a.n, a.k, a.rounds, a.network, a.self_loops, True if a.procs < 3 else False, a.disobej_eq18)
 
+    procs = []
     for _ in range(a.procs):
-        Process(target=work, args=args).start() 
+        p = Process(target=work, args=args)
+        p.start()
+        procs.append(p)
+    procs_done = 0
     while procs_done < a.procs:
         data_list.append(queue.get())
         procs_done += 1
+    for p in procs:
+        p.join()
         
-
-
+    # The list decomp flattens the list
     df = pd.DataFrame([data_point for data in data_list for data_point in data])
-
     df.to_csv(filename, index=False)
 
 if __name__ == "__main__":

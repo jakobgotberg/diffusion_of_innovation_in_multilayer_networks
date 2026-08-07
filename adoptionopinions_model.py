@@ -147,16 +147,16 @@ class State:
 class Simulation:
     max_states : int = 2**20
     min_converge_check : int = 2**10
-    converge_check_window_size : int = 2**5
     converge_check_atol = 1e-8
-    converge_check_freq = 2**5
     n_states = 1
 
-    def __init__(self, simulation_constants, initial_states, net):
+    def __init__(self, simulation_constants, initial_states, net, window_size=2**5):
         self.constants = simulation_constants
         self.net = net
-        self.states = deque(maxlen=self.converge_check_window_size)
+        self.states = deque(maxlen=window_size)
         self.states.append(State(initial_states.s, initial_states.a, initial_states.d, initial_states.x))
+        self.converge_check_window_size = window_size
+        self.converge_check_freq = window_size
 
     def __call__(self, plot=False):
         def atexit():
@@ -201,6 +201,9 @@ class Simulation:
         return False
 
 
+    def get_adoption_states(self):
+        return [state.a for state in self.states]
+
     def get_adoption_steady_state(self):
         return self.states[-1].a
 
@@ -220,7 +223,116 @@ class Simulation:
         return self.net.V
 
 
-def random_simulation_constants_factory(n, k, x0):
+def _random_simulation_constants_factory(n, k, x0):
+    '''
+    Returns the arguments needed to construct a Simulation class instance.
+    If k == 2, technology 0 will be the dominant technology with (delta[0] < delta[1]).all().
+    If k != 2, delta is homogenous.
+    '''
+    min_float = np.nextafter(0,1)
+
+    def equal_across():
+        scalers = np.random.rand(k)
+        return np.array( [[scalers[i]] * n for i in range(k)] )
+
+    if k == 2:
+        lambd = np.random.rand(k,n)
+        xi    = np.random.rand(k,n)
+        delta = np.zeros((k,n))
+        for e in itertools.product(range(k), range(n)):
+            # 'e' is the Cartesian product of k and n, i.e., all indexes of the matries
+            while lambd[e[0]][e[1]] + xi[e[0]][e[1]] >= 1:
+                lambd[e[0]][e[1]], xi[e[0]][e[1]] = np.random.rand(k)
+
+        for j in range(n):
+            while(True):
+                delta[:,j] = np.random.rand(k)
+                if (delta[0][j] < delta[1][j]):
+                    break
+    else:
+
+        # The deltas are uniform: each community has the same dissatisfaction rate for each
+        # technology, this makes the random generation much more likely to satisfy the inequality in 
+        # equaiton 18.
+        limits = sorted(np.random.random(2))
+        delta_range = np.linspace(limits[0], limits[1], k)
+        delta = np.array( [[delta_range[i]] * n for i in range(k)] )
+
+        upper_limit = 1
+        for i in range(k):
+            while True:
+                while True:
+                    xi    = upper_limit * equal_across()
+                    lambd = upper_limit * equal_across()
+                    if (xi + lambd < 1).all():
+                        break
+
+                # Equation 18
+                if (max(xi[i]) / 1 - max(lambd[i])) * (1/delta_range[-1]) * (1 + 1/delta_range[0]) < 1:
+                    break
+
+                # if the inequality is false, we limit how large xi and lambd can be and try again.
+                # Obvioulsy cannot be a negative number though.
+                upper_limit -= 0.01
+                upper_limit = max(upper_limit, min_float)
+
+    assert (lambd + xi < 1).all()
+
+
+    def col_sum_control(A):
+        col_sum_max = A.sum(axis=0).max()
+        if  col_sum_max >= 1:
+            A *= 0.99 / col_sum_max
+        return A
+
+    beta  = col_sum_control(equal_across())
+    gamma = col_sum_control(equal_across())
+
+    assert ((beta.T @ np.ones(k) > 0).all()) and \
+            ((beta.T @ np.ones(k) < 1).all()), f"Beta is not in allowed range: {beta.T @ np.ones(k)}"
+    assert ((delta >= 0).all() and (delta <= 1).all())
+    assert lambd.shape == (k,n) and xi.shape == (k,n)
+    for i in range(k):
+        assert (lambd >= 0).all() and (xi >= 0).all() and (lambd + xi < 1).all()
+    if k == 2:
+        assert (delta[1] > delta[0]).all()
+
+    return Simulation_constants(
+            n=n,
+            k=k,
+            lambd = lambd,
+            xi = xi,
+            beta  = beta,
+            gamma = gamma,
+            delta = delta,
+            x0 = x0
+            )
+
+def eq18(k, n, delta):
+    '''
+    Special case when eq18 should not be true.
+    '''
+    LOOP_LIMIT = (2 * n) // k
+    lambd = np.empty((k,n))
+    xi    = np.empty((k,n))
+    for i in range(k):
+        for _ in range(LOOP_LIMIT):
+            lambd[i] = np.random.random(n)
+            xi[i]    = np.random.random(n)
+            for j in range(n):
+                while lambd[i][j] + xi[i][j] >= 1:
+                    lambd[i][j] = np.random.rand()
+                    xi[i][j]   = np.random.rand()
+
+            #print((max(xi[i]) / 1 - max(lambd[i])) * (1/max(delta[i])) * (1 + 1/min(delta[:,i])))
+            if (max(xi[i]) / 1 - max(lambd[i])) * (1/max(delta[i])) * (1 + 1/min(delta[:,i])) >= 1:
+                break
+        else:
+            return False
+    return (lambd, delta, xi)
+
+
+def random_simulation_constants_factory(n, k, x0, obej_eq_18=True):
     '''
     Returns the arguments needed to construct a Simulation class instance.
     If k == 2, technology 0 will be the dominant technology with (delta[0] < delta[1]).all().
@@ -247,36 +359,50 @@ def random_simulation_constants_factory(n, k, x0):
         # The deltas are uniform: each community has the same dissatisfaction rate for each
         # technology, this makes the random generation much more likely to satisfy the inequality in 
         # equaiton 18.
-        limits = sorted(np.random.random(2))
-        delta_range = np.linspace(limits[0], limits[1], k)
-        delta = np.array( [[delta_range[i]] * n for i in range(k)] )
 
-        upper_limit = 1
-        for i in range(k):
-            while True:
-                for j in range(n):
-                    while lambd[i][j] + xi[i][j] >= 1:
-                        lambd[i][j] = np.random.rand()
-                        xi[i][j]   = np.random.rand()
+        if obej_eq_18:
+            limits = sorted(np.random.random(2))
+            delta_range = np.linspace(limits[0], limits[1], k)
+            delta = np.array( [[delta_range[i]] * n for i in range(k)] )
 
-                # Equation 18
-                if (max(xi[i]) / 1 - max(lambd[i])) * (1/delta_range[-1]) * (1 + 1/delta_range[0]) < 1:
+            upper_limit = 1
+            for i in range(k):
+                while True:
+                    lambd[i] = upper_limit * np.random.random(n)
+                    xi[i]    = upper_limit * np.random.random(n)
+                    for j in range(n):
+                        while lambd[i][j] + xi[i][j] >= 1:
+                            lambd[i][j] = np.random.rand()
+                            xi[i][j]   = np.random.rand()
+
+                    # Equation 18
+                    if (max(xi[i]) / 1 - max(lambd[i])) * (1/max(delta[i])) * (1 + 1/min(delta[:,i])) < 1:
+                        break
+
+                    # if the inequality is false, we limit how large xi and lambd can be and try again.
+                    # Obvioulsy cannot be a negative number though.
+                    upper_limit -= 0.01
+                    upper_limit = max(upper_limit, min_float)
+        else:
+            delta = np.random.rand(k,n)
+            for i in range(1, n):
+                if (tup := eq18(k=k, n=n, delta=delta)):
+                    lambd, delta, xi = tup
                     break
+                else:
+                    delta = np.random.beta(1, i, size=(k,n))
+            else:
+                raise Exception("Unable to generate simulation constants")
 
-                # if the inequality is false, we limit how large xi and lambd can be and try again.
-                # Obvioulsy cannot be a negative number though.
-                upper_limit -= 0.01
-                upper_limit = max(upper_limit, min_float)
-                lambd[i] = upper_limit * np.random.random(n)
-                xi[i]    = upper_limit * np.random.random(n)
-
-    assert (lambd + xi < 1).all()
+    a = lambd + xi
+    assert (lambd + xi < 1).all(), f"{a[a > 1]}"
     # The col sum of the beta matrix must be in (0,1)
     def col_sum_control(A):
         col_sum_max = A.sum(axis=0).max()
         if  col_sum_max >= 1:
             A *= 0.99 / col_sum_max
         return A
+
     beta  = col_sum_control(np.random.rand(k,n))
     gamma = col_sum_control(np.random.rand(k,n))
 
@@ -300,11 +426,12 @@ def random_simulation_constants_factory(n, k, x0):
             x0 = x0
             )
 
+
 def initial_state_factory(n, k, adopters=None, influencers=None):
     a = np.zeros((k,n))
     s = np.ones(n)
     d= np.zeros((k,n))
-    x= np.array([[0.1] * n] * k)
+    x = np.random.rand(k,n)
 
     if adopters is not None:
         for community in adopters:
@@ -312,11 +439,13 @@ def initial_state_factory(n, k, adopters=None, influencers=None):
             a[0][community] = min(a[0][community] + np.random.beta(10,1), s[community])
             s[community] = s[community] - a[0][community] + prev
     else:
-        while True:
-            a = np.random.beta(1, 5, size=(k,n))
-            s = np.ones(n) - np.sum(a,axis=0)
+        for i in range(k, 100 * k):
+            a = np.random.beta(1, i, size=(k,n))
+            s = np.ones(n) - np.sum(a, axis=0)
             if (s >= 0).all() and (s <= 1).all():
                 break
+        else:
+            raise Exception("Unable to generate initial state")
 
     if influencers is not None:
         for community in influencers:

@@ -56,6 +56,13 @@ def random_complete(n):
                 break
     return A
 
+@row_stochatsic_test
+def complete(n):
+    A = np.ones((n,n))
+    np.fill_diagonal(A, 0)
+    A /= sum(A)
+    return A
+
 
 @row_stochatsic_test
 def ring(n):
@@ -69,6 +76,23 @@ def ring(n):
     assert np.allclose(A @ np.ones(n), np.ones(n)), "Not row stochastic"
     return A
 
+
+@row_stochatsic_test
+def directed_lattice(n, neighbors, self_loop=False):
+    A = np.zeros((n,n))
+    for _ in range(neighbors):
+        for i in range(n):
+            for j in range(i+1, n+i):
+                # find first zero element
+                if A[i][j%n] != 0:
+                    continue
+                A[i][j%n] = 1/n if self_loop else 1
+                break
+    if self_loop:
+        np.fill_diagonal(A, 1 - np.sum(A[0]))
+    else:
+        A[A != 0] = 1/(np.count_nonzero(A)/n)
+    return A
 
 @row_stochatsic_test
 def regular_lattice(n, neighbors, self_loop=False):
