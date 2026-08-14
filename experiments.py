@@ -1,4 +1,4 @@
-import argparse, os, time, pickle
+import argparse, os, time
 from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing import SimpleQueue, Process
@@ -7,10 +7,7 @@ import numpy as np
 import pandas as pd
 
 from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Simulation_constants, Initial_state, Networks
-from networks import regular_lattice, random_complete, ring, influencer_network, complete, directed_lattice
-
-
-T = 12
+from networks import regular_lattice, random_complete, influencer_network, ring, binary_tree, random_complete_self_loops, directed_lattice, directed_binary_tree, complete, directed_star, T_directed_star, I
 
 
 @dataclass()
@@ -23,32 +20,20 @@ class Experiment:
 
 @dataclass(frozen=True)
 class Trial:
-    variable_value : int
+    variable_value : str
     a_converged_at : int
     x_converged_at : int
     a_steady_state : np.ndarray
     x_steady_state : np.ndarray
+    W : np.ndarray
 
 
-@dataclass(frozen=True)
-class Connectivity_experiment_data_point:
-    network : str
-    self_loops : bool
-    relative_degree : float
-    relative_a_convergence : float
-    relative_x_convergence : float
-    a_steady_state_distribution : np.ndarray
-    x_steady_state_distribution : np.ndarray
-
-@dataclass(frozen=True)
-class Influencer_experiment_data_point:
-    network : str
-    relative_n_influencers : float
-    relative_a_convergence : float
-    relative_x_convergence : float
-    a_steady_state_distribution : np.ndarray
-    x_steady_state_distribution : np.ndarray
-
+def w(A):
+    eigenvalues, eigenvectors = np.linalg.eig(A.T)
+    idx = np.argmax(np.abs(eigenvalues))
+    lambda_dominant = eigenvalues[idx]
+    v_left = eigenvectors[:, idx]
+    return np.unique(v_left)
 
 def printing(pid, ix, trials) -> None:
     def preamble(p,c,typ):
@@ -73,13 +58,69 @@ def printing(pid, ix, trials) -> None:
           )
 
 
-def run_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool, verbose:bool, disobej_eq18:bool):
+def run_topo_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, unique_pref:bool):
+    pid = os.getpid()
     np.random.seed(None)
-    increments = [2**i for i in range(1,11)]
+    adopters = [n-1]
+    network_influencers = [n-1]
+    W = ring(n)
+    data = []
+    for _ in range(rounds):
+        experiment = Experiment(
+                experiment_id=f"{pid}{time.time_ns()}",
+                n=n,
+                k=k)
+        IS = initial_state_factory(n, k, adopters=adopters, influencers=network_influencers)
+        SC = random_simulation_constants_factory(n, k, IS.x, unique_pref=unique_pref)
+        for topo in [I, directed_star, T_directed_star]:
+            V = topo(n)
+            sim = Simulation(
+                    simulation_constants = SC,
+                    initial_states = IS,
+                    net = Networks(W=W, V=V)
+                    )
+            while not sim():
+                pass
+            trial = Trial(
+                    variable_value = "Identity" if topo == I else "star",
+                        a_converged_at = sim.get_adoption_convergence_point(),
+                        x_converged_at = sim.get_opinion_convergence_point(),
+                        a_steady_state = sim.get_adoption_steady_state(),
+                        x_steady_state = sim.get_opinion_steady_state(),
+                        W = W
+                        )
+            experiment.trials.append(trial)
+
+        for trial in experiment.trials:
+            data.append(
+                    dict(
+                        experiment_id=experiment.experiment_id,
+                        #network=None
+                        #self_loops=None,
+                        #eq18_violated=None,
+                        #n=n,
+                        #k=k,
+                        relative_value=trial.variable_value,
+                        #relative_a_convergence=trial.a_converged_at,
+                        a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
+                        #x_steady_state_distribution=trial.x_steady_state.mean(axis=1),
+                        #influencers=network_influencers,
+                        #adopters=adopters,
+                        W=trial.W
+                    )
+                    )
+    queue.put(data)
+
+
+def run_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, network:str, self_loops:bool, verbose:bool, disobej_eq18:bool, unique_pref:bool):
+    np.random.seed(None)
+    increments = [2, 16, 64, 128, 256, 512, 768, 1024]
+    adopters = [i for i in range(8)]
+    network_influencers = [i for i in range(8)]
     def lattice(experiment):
         t0 = time.perf_counter()
-        IS = initial_state_factory(n, k, adopters=None, influencers=None)
-        SC = random_simulation_constants_factory(n, k, IS.x, obej_eq_18=not disobej_eq18)
+        IS = initial_state_factory(n, k, adopters=adopters, influencers=network_influencers)
+        SC = random_simulation_constants_factory(n, k, IS.x, obej_eq_18=not disobej_eq18, unique_pref=unique_pref)
         RC = random_complete(n)
         print(f"\tgen: {abs(t0-time.perf_counter()):.3f} s")
 
@@ -109,17 +150,11 @@ def run_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, network:str, sel
         return max_degree
 
     def influencer(experiment):
-        SC = random_simulation_constants_factory(n, k, x0=np.random.rand(k,n), obej_eq_18=not disobej_eq18)
+        IS = initial_state_factory( n, k, adopters=adopters, influencers=network_influencers)
+        SC = random_simulation_constants_factory(n, k, x0=IS.x, obej_eq_18=not disobej_eq18)
         W = random_complete(n)
         influencers = [i for i in range(n)]
-        for n_influencers in [1] + increments:
-            IS = initial_state_factory(
-                                    n, 
-                                    k, 
-                                    adopters=[0], #influencers[:n_influencers],
-                                    influencers=[0],#influencers[:n_influencers]
-                                    )
-            SC.set_x0(IS.x)
+        for n_influencers in increments:
             V = influencer_network(n, influencers[:n_influencers])
             sim = Simulation(
                     simulation_constants = SC,
@@ -157,18 +192,24 @@ def run_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, network:str, sel
         # The inner functions have side effects to update the 'experiment' object
         max_value = influencer(experiment) if network == "influencer" else lattice(experiment)
         max_a_convergence = max([trial.a_converged_at for trial in experiment.trials])
-        max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
+        #max_x_convergence = max([trial.x_converged_at for trial in experiment.trials])
 
         for trial in experiment.trials:
             data.append(
                     dict(
+                        experiment_id=experiment.experiment_id,
                         network=network,
                         self_loops=self_loops,
+                        eq18_violated=disobej_eq18,
+                        n=n,
+                        k=k,
                         relative_value=trial.variable_value/max_value,
                         relative_a_convergence=trial.a_converged_at / max_a_convergence,
-                        relative_x_convergence=trial.x_converged_at / max_x_convergence,
                         a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
-                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1)
+                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1),
+                        influencers=network_influencers,
+                        adopters=adopters,
+                        W=trial.W
                     )
                     )
     queue.put(data)
@@ -181,19 +222,37 @@ def main(pid):
     p.add_argument("--self-loops",action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--rounds", type=int, default=2)
     p.add_argument("--procs", type=int, default=1)
+    p.add_argument("--topo-experiment",action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--disobej-eq18",action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--unique-pref",action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--filename-trailer", default="")
     a = p.parse_args()
-    s = "_self_loops" if a.self_loops else ""
-    filename = "data_" + a.network + f"_{pid}_" + datetime.now().strftime("%B_%d__%H_%M") + s + ".csv"
 
     data_list = []
     queue = SimpleQueue()
-    work = run_experiment
-    args = (queue, a.n, a.k, a.rounds, a.network, a.self_loops, True if a.procs < 3 else False, a.disobej_eq18)
+    work = run_topo_experiment if a.topo_experiment else run_experiment
+    kwargs = {'queue':queue,
+            'n':a.n, 
+            'k':a.k, 
+            'rounds':a.rounds, 
+            'network':a.network, 
+            'self_loops':a.self_loops, 
+            'verbose':True if a.procs < 3 else False, 
+            'disobej_eq18':a.disobej_eq18, 
+            'unique_pref':a.unique_pref
+            }
+
+    if a.topo_experiment:
+        kwargs = {'queue':queue,
+                'n':a.n, 
+                'k':a.k, 
+                'rounds':a.rounds, 
+                'unique_pref':a.unique_pref
+                }
 
     procs = []
     for _ in range(a.procs):
-        p = Process(target=work, args=args)
+        p = Process(target=work, kwargs=kwargs)
         p.start()
         procs.append(p)
     procs_done = 0
@@ -203,6 +262,8 @@ def main(pid):
     for p in procs:
         p.join()
         
+    s = "_self_loops" if a.self_loops else ""
+    filename = "data_" + a.network + f"_{pid}_" + datetime.now().strftime("%B_%d__%H_%M") + s + a.filename_trailer + ".csv"
     # The list decomp flattens the list
     df = pd.DataFrame([data_point for data in data_list for data_point in data])
     df.to_csv(filename, index=False)
