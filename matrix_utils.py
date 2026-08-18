@@ -31,3 +31,4 @@ def irreducible(B):
             return True
 
     return False
+

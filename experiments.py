@@ -71,8 +71,8 @@ def run_topo_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, unique_pref
                 n=n,
                 k=k)
         IS = initial_state_factory(n, k, adopters=adopters, influencers=network_influencers)
-        SC = random_simulation_constants_factory(n, k, IS.x, unique_pref=unique_pref)
-        for topo in [I, directed_star, T_directed_star]:
+        SC = random_simulation_constants_factory(n, k, IS.x, unique_pref=unique_pref, influencers=network_influencers)
+        for topo in [I, complete, directed_star]:
             V = topo(n)
             sim = Simulation(
                     simulation_constants = SC,
@@ -81,8 +81,18 @@ def run_topo_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, unique_pref
                     )
             while not sim():
                 pass
+            topo_str = ""
+            if topo == I:
+                topo_str = "Identity"
+            elif topo == complete: 
+                topo_str = "Complete"
+            elif topo == directed_star:
+                topo_str = "Star"
+            else:
+                raise Exception("topo")
+
             trial = Trial(
-                    variable_value = "Identity" if topo == I else "star",
+                    variable_value = topo_str,
                         a_converged_at = sim.get_adoption_convergence_point(),
                         x_converged_at = sim.get_opinion_convergence_point(),
                         a_steady_state = sim.get_adoption_steady_state(),
@@ -98,15 +108,15 @@ def run_topo_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, unique_pref
                         #network=None
                         #self_loops=None,
                         #eq18_violated=None,
-                        #n=n,
-                        #k=k,
+                        n=n,
+                        k=k,
                         relative_value=trial.variable_value,
-                        #relative_a_convergence=trial.a_converged_at,
+                        relative_a_convergence=trial.a_converged_at,
                         a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
                         #x_steady_state_distribution=trial.x_steady_state.mean(axis=1),
                         #influencers=network_influencers,
                         #adopters=adopters,
-                        W=trial.W
+                        #W=V
                     )
                     )
     queue.put(data)
