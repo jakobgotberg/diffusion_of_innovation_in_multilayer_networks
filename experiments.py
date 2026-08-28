@@ -6,8 +6,8 @@ from multiprocessing import SimpleQueue, Process
 import numpy as np
 import pandas as pd
 
-from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Simulation_constants, Initial_state, Networks
-from networks import regular_lattice, random_complete, influencer_network, ring, binary_tree, random_complete_self_loops, directed_lattice, directed_binary_tree, complete, directed_star, T_directed_star, I
+from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Networks
+from networks import regular_lattice, random_complete, influencer_network, ring, complete, directed_star, I
 
 
 @dataclass()
@@ -105,18 +105,18 @@ def run_topo_experiment(queue:SimpleQueue, n:int, k:int, rounds:int, unique_pref
             data.append(
                     dict(
                         experiment_id=experiment.experiment_id,
-                        #network=None
-                        #self_loops=None,
-                        #eq18_violated=None,
+                        network=None
+                        self_loops=None,
+                        eq18_violated=None,
                         n=n,
                         k=k,
                         relative_value=trial.variable_value,
                         relative_a_convergence=trial.a_converged_at,
                         a_steady_state_distribution=trial.a_steady_state.mean(axis=1),
-                        #x_steady_state_distribution=trial.x_steady_state.mean(axis=1),
-                        #influencers=network_influencers,
-                        #adopters=adopters,
-                        #W=V
+                        x_steady_state_distribution=trial.x_steady_state.mean(axis=1),
+                        influencers=network_influencers,
+                        adopters=adopters,
+                        W=V
                     )
                     )
     queue.put(data)

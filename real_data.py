@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from adoptionopinions_model import initial_state_factory, random_simulation_constants_factory, Simulation, Simulation_constants, Initial_state, Networks
+from adoptionopinions_model import random_simulation_constants_factory, Simulation, Initial_state, Networks
 from networks import complete
 
 
@@ -16,9 +16,7 @@ def MSE(y, y_pred):
     ret = np.mean(np.square(y - y_pred))
     return ret
 
-
-#vendors = ["Samsung", "Apple", "Xiaomi"]#, "Huawei"]#, "Oppo", "Nokia", "LG", "Motorola"]
-vendors = ["Apple","Samsung", "Sony"]
+vendors = ["Chrome","Safari","Firefox"]
 vendor_map = {vendor: i for i, vendor in enumerate(vendors)}
 
 def printing(i, rounds, error):

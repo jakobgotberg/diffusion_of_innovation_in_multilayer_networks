@@ -116,7 +116,6 @@ class Simulation:
         self.net = net
         self.states = deque(maxlen=window_size)
         self.states = [State(initial_states.s, initial_states.a, initial_states.d, initial_states.x)]
-        #self.states.append(State(initial_states.s, initial_states.a, initial_states.d, initial_states.x))
         self.converge_check_window_size = window_size
         self.converge_check_freq = window_size
 
@@ -253,46 +252,6 @@ def random_simulation_constants_factory(n, k, x0, obej_eq_18=True, unique_pref=F
     if k == 2:
         assert False, "Not implemented"
 
-    # The deltas are uniform: each community has the same dissatisfaction rate for each
-    # technology, this makes the random generation much more likely to satisfy the inequality in 
-    # equaiton 18.
-
-    #if obej_eq_18:
-    #    limits = sorted(np.random.random(2))
-    #    delta_range = np.linspace(limits[0], limits[1], k)
-    #    delta = np.array( [[delta_range[i]] * n for i in range(k)] )
-
-    #    upper_limit = 1
-    #    for i in range(k):
-    #        for i in range(1,n): # amount of tries to generate one rows before aborting entirely
-    #            if unique_pref:
-    #                lambd[i] = upper_limit * np.random.random(n)
-    #                xi[i]    = upper_limit * np.random.random(n)
-    #                for j in range(n):
-    #                    while lambd[i][j] + xi[i][j] >= 1:
-    #                        lambd[i][j] = np.random.rand()
-    #                        xi[i][j]   = np.random.rand()
-    #            else:
-    #                while True:
-    #                    xi    = upper_limit * equal_across(n,k)
-    #                    lambd = upper_limit * equal_across(n,k)
-    #                    if (xi + lambd < 1).all():
-    #                        break
-
-    #            if i == 0:
-    #                set_influencer(influencers, delta, lambd, xi)
-    #            # Equation 18
-    #            E = (max(xi[i]) / (1 - max(lambd[i]))) * (1/max(delta[i])) * (1 + 1/min(delta[:,i]))
-    #            if E < 1:
-    #                break
-
-    #            # if the inequality is false, we limit how large xi and lambd can be and try again.
-    #            # Obvioulsy cannot be a negative number though.
-    #            upper_limit -= 0.01
-    #            upper_limit = max(upper_limit, min_float)
-    #        else:
-    #            raise Exception("Unable to generate simulation constants: EQ18 satisfied branch")
-    #else:
     eq18 = sat_eq18 if obej_eq_18 else violate_eq18
 
     if unique_pref:
